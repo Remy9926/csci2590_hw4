@@ -23,6 +23,7 @@ def get_args():
 
     # Model hyperparameters
     parser.add_argument('--finetune', action='store_true', help="Whether to finetune T5 or not")
+    parser.add_argument('--random_init', action='store_true', help="Whether to randomly initialize model weights or not")
     
     # Training hyperparameters
     parser.add_argument('--optimizer_type', type=str, default="AdamW", choices=["AdamW"],
@@ -210,6 +211,19 @@ def main():
     # Load the data and the model
     train_loader, dev_loader, test_loader = load_t5_data(args.batch_size, args.test_batch_size)
     model = initialize_model(args).to(DEVICE)
+
+    # set to True/False to unfreeze/freeze encoder
+    model.encoder.requires_grad = True
+
+    if args.random_init:
+        for param in model.parameters():
+            if param.dim() >= 2:
+                torch.nn.init.xavier_uniform_(param)
+            else:
+                torch.nn.init.normal_(param)
+            param.requires_grad = True
+        print("model weights all randomly initialized!")
+
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
 
     # Train 
