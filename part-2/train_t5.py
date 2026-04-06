@@ -13,6 +13,7 @@ from utils import compute_metrics, save_queries_and_records
 from load_data import tokenizer
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+gen_config = GenerationConfig.from_pretrained("google-t5/t5-small", max_new_tokens=512, stop_strings=["</s>"])
 PAD_IDX = 0
 
 def get_args():
@@ -67,35 +68,51 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch}: Average train loss was {tr_loss}")
 
-        eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
-                                                                         gt_sql_path, model_sql_path,
-                                                                         gt_record_path, model_record_path)
-        print(f"Epoch {epoch}: Dev loss: {eval_loss}, Record F1: {record_f1}, Record EM: {record_em}, SQL EM: {sql_em}")
-        print(f"Epoch {epoch}: {error_rate*100:.2f}% of the generated outputs led to SQL errors")
+        if tr_loss < 1:
+            eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
+                                                                             gt_sql_path, model_sql_path,
+                                                                             gt_record_path, model_record_path)
+            print(f"Epoch {epoch}: Dev loss: {eval_loss}, Record F1: {record_f1}, Record EM: {record_em}, SQL EM: {sql_em}")
+            print(f"Epoch {epoch}: {error_rate*100:.2f}% of the generated outputs led to SQL errors")
 
-        if args.use_wandb:
-            result_dict = {
-                'train/loss' : tr_loss,
-                'dev/loss' : eval_loss,
-                'dev/record_f1' : record_f1,
-                'dev/record_em' : record_em,
-                'dev/sql_em' : sql_em,
-                'dev/error_rate' : error_rate,
-            }
-            wandb.log(result_dict, step=epoch)
+            if args.use_wandb:
+                result_dict = {
+                    'train/loss' : tr_loss,
+                    'dev/loss' : eval_loss,
+                    'dev/record_f1' : record_f1,
+                    'dev/record_em' : record_em,
+                    'dev/sql_em' : sql_em,
+                    'dev/error_rate' : error_rate,
+                }
+                wandb.log(result_dict, step=epoch)
 
-        if record_f1 > best_f1:
-            best_f1 = record_f1
-            epochs_since_improvement = 0
-        else:
-            epochs_since_improvement += 1
+            if record_f1 > best_f1:
+                best_f1 = record_f1
+                epochs_since_improvement = 0
+            else:
+                epochs_since_improvement += 1
 
-        save_model(checkpoint_dir, model, epoch, best=False)
-        if epochs_since_improvement == 0:
-            save_model(checkpoint_dir, model, epoch, best=True)
+            save_model(checkpoint_dir, model, epoch, best=False)
+            if epochs_since_improvement == 0:
+                save_model(checkpoint_dir, model, epoch, best=True)
 
-        if epochs_since_improvement >= args.patience_epochs:
-            break
+            if epochs_since_improvement >= args.patience_epochs:
+                break
+
+            with open(f"dump/epoch_{epoch}_stats.txt", "a") as file:
+                layer = 0
+                for param in model.parameters():
+                    stats = get_stats(param)
+                    file.write(f"Layer {layer}:\n{stats}")
+                    layer += 1
+        elif tr_loss < 1.5:
+            save_model(checkpoint_dir, model, epoch, best=False)
+            with open(f"dump/epoch_{epoch}_stats.txt", "a") as file:
+                layer = 0
+                for param in model.parameters():
+                    stats = get_stats(param)
+                    file.write(f"Layer {layer}:\n{stats}")
+                    layer += 1
 
 def train_epoch(args, model, train_loader, optimizer, scheduler):
     model.train()
@@ -145,7 +162,6 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
     total_dev_loss = 0
     total_tokens = 0
     criterion = nn.CrossEntropyLoss()
-    gen_config = GenerationConfig.from_pretrained("google-t5/t5-small", max_new_tokens=512, stop_strings=["</s>"])
     model_generations = []
 
     for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(dev_loader, desc="Evaluating model on dev set"):
@@ -153,26 +169,23 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
         encoder_mask = encoder_mask.to(DEVICE)
         decoder_input = decoder_input.to(DEVICE)
         decoder_targets = decoder_targets.to(DEVICE)
-
-        logits = model(
-            input_ids=encoder_input,
-            attention_mask=encoder_mask,
-            decoder_input_ids=decoder_input,
-        )['logits']
-        
-        generations = model.generate(encoder_input, num_beams=2, generation_config=gen_config)
-        model_generations += generations
-
-        non_pad = decoder_targets != PAD_IDX
-        loss = criterion(logits[non_pad], decoder_targets[non_pad])
-        
+ 
         with torch.no_grad():
+            logits = model(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                decoder_input_ids=decoder_input,
+            )['logits']
+            generations = model.generate(encoder_input, attention_mask=encoder_mask, num_beams=2, generation_config=gen_config).cpu()
+            model_generations += tokenizer.batch_decode(generations, skip_special_tokens=True)
+
+            non_pad = decoder_targets != PAD_IDX
+            loss = criterion(logits[non_pad], decoder_targets[non_pad])
             num_tokens = torch.sum(non_pad).item()
             total_dev_loss += loss.item() * num_tokens
             total_tokens += num_tokens
     
-    final_queries = tokenizer.batch_decode(model_generations, skip_special_tokens=True)
-    save_queries_and_records(final_queries, model_sql_path, model_record_path)
+    save_queries_and_records(model_generations, model_sql_path, model_record_path)
     sql_em, record_em, record_f1, model_error_msgs = compute_metrics(gt_sql_pth, model_sql_path, gt_record_path, model_record_path)
 
     error_count = 0
@@ -188,18 +201,27 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     database records. Implementation should be very similar to eval_epoch.
     '''
     model.eval()
-    gen_config = GenerationConfig.from_pretrained("google-t5/t5-small", max_new_tokens=512, stop_strings=["</s>"])
     model_generations = []
 
     for encoder_input, encoder_mask, _ in tqdm(test_loader, desc="Evaluating model on test set"):
         encoder_input = encoder_input.to(DEVICE)
         encoder_mask = encoder_mask.to(DEVICE)
-        
-        generations = model.generate(encoder_input, num_beams=2, generation_config=gen_config)
-        model_generations += generations
 
-    final_queries = tokenizer.batch_decode(model_generations, skip_special_tokens=True)
-    save_queries_and_records(final_queries, model_sql_path, model_record_path)
+        with torch.no_grad():
+            generations = model.generate(encoder_input, attention_mask=encoder_mask, num_beams=2, generation_config=gen_config).cpu()
+            model_generations += tokenizer.batch_decode(generations, skip_special_tokens=True)
+
+    save_queries_and_records(model_generations, model_sql_path, model_record_path)
+
+def get_stats(param):
+    mean = param.mean().item()
+    std = param.std().item()
+    var = param.var().item()
+    minimum = param.min().item()
+    maximum = param.max().item()
+
+    return f"Mean: {mean}\nStandard Deviation: {std}\nVariance: {var}\nMinimum: {minimum}\nMaximum: {maximum}\n\n"
+
 
 def main():
     # Get key arguments
@@ -216,12 +238,20 @@ def main():
     model.encoder.requires_grad = True
 
     if args.random_init:
-        for param in model.parameters():
-            if param.dim() >= 2:
-                torch.nn.init.xavier_uniform_(param)
-            else:
-                torch.nn.init.normal_(param)
-            param.requires_grad = True
+        with open("dump/uninit_stats.txt", "a") as file:
+            with open("dump/init_stats.txt", "a") as f:
+                layer = 0
+                for param in model.parameters():
+                    stats = get_stats(param)
+                    file.write(f"Layer {layer}\n{stats}")
+                    if param.dim() >= 2:
+                        torch.nn.init.xavier_uniform_(param)
+                    else:
+                        torch.nn.init.normal_(param)
+                    stats = get_stats(param)
+                    f.write(f"Layer {layer}\n{stats}")
+                    layer += 1
+                    param.requires_grad = True
         print("model weights all randomly initialized!")
 
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
@@ -234,9 +264,6 @@ def main():
     model.eval()
     
     # Dev set
-    experiment_name = args.experiment_name
-    model_type = 'ft' if args.finetune else 'scr'
-    gt_sql_path = os.path.join(f'data/dev.sql')
     gt_record_path = os.path.join(f'records/dev_gt_records.pkl')
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
     model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')

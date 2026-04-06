@@ -128,7 +128,6 @@ def normal_collate_fn(batch):
     tokenized_outputs = tokenizer(outputs, return_tensors="pt", padding=True)
     decoder_targets = tokenized_outputs["input_ids"]
     decoder_inputs = torch.concat((torch.full((decoder_targets.shape[0], 1), tokenizer.pad_token_id), decoder_targets.clone()), dim=-1)
-    decoder_targets[decoder_targets == tokenizer.pad_token_id] = -100
     return input_ids, attention_mask, decoder_inputs[ :, :-1], decoder_targets, torch.full((decoder_targets.shape[0], 1), tokenizer.pad_token_id)
 
 def test_collate_fn(batch):
