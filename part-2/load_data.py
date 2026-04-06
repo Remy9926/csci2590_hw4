@@ -144,8 +144,7 @@ def test_collate_fn(batch):
         * initial_decoder_inputs: The very first input token to be decoder (only to be used in evaluation)
     '''
     # TODO
-    inputs = [x[0] for x in batch]
-    tokenized_inputs = tokenizer(inputs, return_tensors="pt", padding=True)
+    tokenized_inputs = tokenizer(batch, return_tensors="pt", padding=True)
     input_ids = tokenized_inputs["input_ids"]
     attention_mask = tokenized_inputs["attention_mask"]
     return input_ids, attention_mask, torch.full((input_ids.shape[0], 1), tokenizer.pad_token_id)

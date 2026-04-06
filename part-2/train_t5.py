@@ -203,15 +203,19 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     model.eval()
     model_generations = []
 
-    for encoder_input, encoder_mask, _ in tqdm(test_loader, desc="Evaluating model on test set"):
+    for encoder_input, encoder_mask, pad_tokens in tqdm(test_loader, desc="Evaluating model on test set"):
         encoder_input = encoder_input.to(DEVICE)
         encoder_mask = encoder_mask.to(DEVICE)
+        pad_tokens = pad_tokens.to(DEVICE)
+        encoder_input =  torch.concat((encoder_input, pad_tokens), dim=-1)
+        encoder_mask = torch.concat((encoder_mask, torch.full((encoder_mask.shape[0], 1), 1).to(DEVICE)), dim=-1)
 
         with torch.no_grad():
             generations = model.generate(encoder_input, attention_mask=encoder_mask, num_beams=2, generation_config=gen_config).cpu()
             model_generations += tokenizer.batch_decode(generations, skip_special_tokens=True)
 
     save_queries_and_records(model_generations, model_sql_path, model_record_path)
+    print("saved test results!")
 
 def get_stats(param):
     mean = param.mean().item()
@@ -257,13 +261,16 @@ def main():
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
 
     # Train 
-    train(args, model, train_loader, dev_loader, optimizer, scheduler)
+    #train(args, model, train_loader, dev_loader, optimizer, scheduler)
 
     # Evaluate
     model = load_model_from_checkpoint(args, best=True).to(DEVICE)
     model.eval()
     
     # Dev set
+    experiment_name = args.experiment_name
+    model_type = "ft" if args.finetune else "scr"
+    gt_sql_path = os.path.join(f"data/dev.sql")
     gt_record_path = os.path.join(f'records/dev_gt_records.pkl')
     model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_dev.sql')
     model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_dev.pkl')

@@ -67,10 +67,12 @@ def load_model_from_checkpoint(args, best):
             break
     
     if best_model == None:
-        checkpoint = torch.load(files[-1])
+        checkpoint = torch.load(os.path.join(checkpoint_dir, files[-1]))
+        print(f"Loaded model {os.path.join(checkpoint_dir, files[-1])}")
     else:
         checkpoint = torch.load(os.path.join(checkpoint_dir, best_model))
-    
+        print(f"Loaded model {os.path.join(checkpoint_dir, best_model)}")
+
     config = T5Config.from_pretrained("t5-small")
     model = T5ForConditionalGeneration(config)
     model.load_state_dict(checkpoint["model_state_dict"])
