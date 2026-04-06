@@ -261,7 +261,7 @@ def main():
     optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
 
     # Train 
-    #train(args, model, train_loader, dev_loader, optimizer, scheduler)
+    train(args, model, train_loader, dev_loader, optimizer, scheduler)
 
     # Evaluate
     model = load_model_from_checkpoint(args, best=True).to(DEVICE)
